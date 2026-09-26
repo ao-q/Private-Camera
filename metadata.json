@@ -1,0 +1,6 @@
+{
+  "name": "Private Camera",
+  "description": "Native offline camera app with direct Camera2 discovery, lossless PNG capture, optional DNG RAW sensor backup, background video recording, and a secure in-app private gallery.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
