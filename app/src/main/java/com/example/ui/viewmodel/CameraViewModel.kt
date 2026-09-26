@@ -49,7 +49,13 @@ data class CameraUiState(
     val isMicPermissionGranted: Boolean = false,
     val isNotificationPermissionGranted: Boolean = false,
     val showCameraSelectionSheet: Boolean = false,
-    val showTechnicalDetailsModal: Boolean = false
+    val showTechnicalDetailsModal: Boolean = false,
+    val exposureCompensation: Float = 0.0f,
+    val isManualFocus: Boolean = false,
+    val manualFocusDistance: Float = 0.0f,
+    val activeFocusPoint: Pair<Float, Float>? = null,
+    val showEvSlider: Boolean = false,
+    val showFocusSlider: Boolean = false
 )
 
 class CameraViewModel(application: Application) : AndroidViewModel(application) {
@@ -116,6 +122,26 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 _uiState.update { it.copy(zoomRatio = zoom) }
             }
         }
+        viewModelScope.launch {
+            sessionController.exposureCompensation.collect { ev ->
+                _uiState.update { it.copy(exposureCompensation = ev) }
+            }
+        }
+        viewModelScope.launch {
+            sessionController.isManualFocus.collect { isMf ->
+                _uiState.update { it.copy(isManualFocus = isMf) }
+            }
+        }
+        viewModelScope.launch {
+            sessionController.manualFocusDistance.collect { dist ->
+                _uiState.update { it.copy(manualFocusDistance = dist) }
+            }
+        }
+        viewModelScope.launch {
+            sessionController.activeFocusPoint.collect { pt ->
+                _uiState.update { it.copy(activeFocusPoint = pt) }
+            }
+        }
 
         // Observe latest media for gallery thumbnail
         viewModelScope.launch {
@@ -173,8 +199,41 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                         selectedCamera = defaultCamera
                     )
                 }
+                sessionController.openCamera(defaultCamera, null)
             }
         }
+    }
+
+    fun setExposureCompensation(ev: Float) {
+        sessionController.setExposureCompensation(ev)
+    }
+
+    fun setFocusMode(isManual: Boolean, distance: Float = 0.0f) {
+        sessionController.setFocusMode(isManual, distance)
+    }
+
+    fun setManualFocusDistance(distance: Float) {
+        sessionController.setManualFocusDistance(distance)
+    }
+
+    fun triggerTapToFocus(normX: Float, normY: Float, viewWidth: Float, viewHeight: Float) {
+        sessionController.triggerTapToFocus(normX, normY, viewWidth, viewHeight)
+    }
+
+    fun resetToContinuousAf() {
+        sessionController.resetToContinuousAf()
+    }
+
+    fun toggleEvSlider() {
+        _uiState.update { it.copy(showEvSlider = !it.showEvSlider, showFocusSlider = false) }
+    }
+
+    fun toggleFocusSlider() {
+        _uiState.update { it.copy(showFocusSlider = !it.showFocusSlider, showEvSlider = false) }
+    }
+
+    fun closeTuningSliders() {
+        _uiState.update { it.copy(showEvSlider = false, showFocusSlider = false) }
     }
 
     fun selectCamera(camera: CameraInfoModel, previewSurface: Surface?) {

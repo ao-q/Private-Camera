@@ -35,8 +35,17 @@ data class CameraInfoModel(
     val supportedFpsRanges: List<Range<Int>>,
     val supportsVideoStabilization: Boolean,
     val supportsOpticalStabilization: Boolean,
-    val maxDigitalZoom: Float
+    val maxDigitalZoom: Float,
+    val minFocusDistance: Float = 0.0f,
+    val supportsManualFocus: Boolean = false,
+    val aeCompensationRange: Range<Int> = Range(0, 0),
+    val aeCompensationStep: Float = 0.333333f,
+    val optimalPreviewSize: Size = Size(1440, 1080)
 ) {
     val isFrontCamera: Boolean get() = facing == LensFacingType.FRONT
     val isBackCamera: Boolean get() = facing == LensFacingType.BACK
+
+    val minEv: Float get() = aeCompensationRange.lower * aeCompensationStep
+    val maxEv: Float get() = aeCompensationRange.upper * aeCompensationStep
+    val supportsExposureCompensation: Boolean get() = aeCompensationRange.lower != aeCompensationRange.upper
 }

@@ -145,6 +145,31 @@ class CameraDiscoveryManager(private val context: Context) {
         // Max Digital Zoom
         val maxZoom = chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1.0f
 
+        // Focus & Exposure capabilities
+        val minFocusDist = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0.0f
+        val supportsManualFocus = minFocusDist > 0.0f
+        val aeCompRange = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE) ?: Range(0, 0)
+        val aeStepRational = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)
+        val aeCompStep = if (aeStepRational != null && aeStepRational.denominator != 0) {
+            aeStepRational.numerator.toFloat() / aeStepRational.denominator.toFloat()
+        } else {
+            0.333333f
+        }
+
+        // Preview size selection for SurfaceHolder (4:3 or 16:9 matching maxPhotoSize without lag)
+        val previewSizes = map?.getOutputSizes(android.view.SurfaceHolder::class.java)?.toList() ?: emptyList()
+        val targetRatio = if (maxPhotoSize.height > 0) maxPhotoSize.width.toDouble() / maxPhotoSize.height.toDouble() else (4.0 / 3.0)
+        val matchingRatioPreviewSizes = previewSizes.filter {
+            val r = it.width.toDouble() / it.height.toDouble()
+            Math.abs(r - targetRatio) < 0.08
+        }
+        val previewCandidates = if (matchingRatioPreviewSizes.isNotEmpty()) matchingRatioPreviewSizes else previewSizes
+        val optimalPreviewSize = previewCandidates
+            .filter { it.width <= 1920 && it.height <= 1440 && it.width >= 640 }
+            .maxByOrNull { it.width * it.height }
+            ?: previewCandidates.maxByOrNull { it.width * it.height }
+            ?: Size(1440, 1080)
+
         // Calculate 35mm equivalent & zoom factor
         var equivalent35mm: Float? = null
         var zoomFactor = 1.0f
@@ -212,7 +237,12 @@ class CameraDiscoveryManager(private val context: Context) {
             supportedFpsRanges = fpsRanges,
             supportsVideoStabilization = supportsVideoStab,
             supportsOpticalStabilization = supportsOis,
-            maxDigitalZoom = maxZoom
+            maxDigitalZoom = maxZoom,
+            minFocusDistance = minFocusDist,
+            supportsManualFocus = supportsManualFocus,
+            aeCompensationRange = aeCompRange,
+            aeCompensationStep = aeCompStep,
+            optimalPreviewSize = optimalPreviewSize
         )
     }
 }

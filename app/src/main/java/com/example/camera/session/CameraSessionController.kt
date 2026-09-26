@@ -79,6 +79,18 @@ class CameraSessionController(
     private val _zoomRatio = MutableStateFlow(1.0f)
     val zoomRatio: StateFlow<Float> = _zoomRatio.asStateFlow()
 
+    private val _exposureCompensation = MutableStateFlow(0.0f) // in EV (e.g. -2.0 to +2.0)
+    val exposureCompensation: StateFlow<Float> = _exposureCompensation.asStateFlow()
+
+    private val _isManualFocus = MutableStateFlow(false)
+    val isManualFocus: StateFlow<Boolean> = _isManualFocus.asStateFlow()
+
+    private val _manualFocusDistance = MutableStateFlow(0.0f) // in diopters (0 = infinity)
+    val manualFocusDistance: StateFlow<Float> = _manualFocusDistance.asStateFlow()
+
+    private val _activeFocusPoint = MutableStateFlow<Pair<Float, Float>?>(null)
+    val activeFocusPoint: StateFlow<Pair<Float, Float>?> = _activeFocusPoint.asStateFlow()
+
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
 
@@ -87,6 +99,7 @@ class CameraSessionController(
 
     private var currentCharacteristics: CameraCharacteristics? = null
     private var lastCaptureResult: CaptureResult? = null
+    private var activeAfMeteringRect: android.hardware.camera2.params.MeteringRectangle? = null
 
     // Service reference for foreground background recording
     private var recordingService: VideoRecordingService? = null
@@ -128,14 +141,123 @@ class CameraSessionController(
 
     fun setFlashMode(mode: FlashMode) {
         _flashMode.value = mode
-        applyFlashAndZoom()
+        applyPreviewSettings()
     }
 
     fun setZoom(ratio: Float) {
         val camera = _currentCamera.value ?: return
         val clamped = ratio.coerceIn(1.0f, camera.maxDigitalZoom.coerceAtLeast(1.0f))
         _zoomRatio.value = clamped
-        applyFlashAndZoom()
+        applyPreviewSettings()
+    }
+
+    fun setExposureCompensation(ev: Float) {
+        val camera = _currentCamera.value ?: return
+        val clamped = if (camera.supportsExposureCompensation) {
+            ev.coerceIn(camera.minEv, camera.maxEv)
+        } else 0.0f
+        _exposureCompensation.value = clamped
+        applyPreviewSettings()
+    }
+
+    fun setFocusMode(isManual: Boolean, distance: Float = 0.0f) {
+        _isManualFocus.value = isManual
+        val camera = _currentCamera.value
+        val maxDist = camera?.minFocusDistance ?: 10.0f
+        _manualFocusDistance.value = distance.coerceIn(0.0f, maxDist)
+        if (!isManual) {
+            activeAfMeteringRect = null
+            _activeFocusPoint.value = null
+        }
+        applyPreviewSettings()
+    }
+
+    fun setManualFocusDistance(distance: Float) {
+        val camera = _currentCamera.value
+        val maxDist = camera?.minFocusDistance ?: 10.0f
+        _manualFocusDistance.value = distance.coerceIn(0.0f, maxDist)
+        applyPreviewSettings()
+    }
+
+    fun triggerTapToFocus(normX: Float, normY: Float, viewWidth: Float, viewHeight: Float) {
+        val camera = _currentCamera.value ?: return
+        val chars = currentCharacteristics ?: return
+        val activeArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return
+        val session = captureSession ?: return
+        val builder = previewRequestBuilder ?: return
+
+        _isManualFocus.value = false
+        _activeFocusPoint.value = Pair(normX * viewWidth, normY * viewHeight)
+
+        // Calculate sensor coordinates with correct rotation & mirroring
+        val sensorOrientation = camera.sensorOrientation
+        val isFront = camera.isFrontCamera
+
+        val (sensorNormX, sensorNormY) = when (sensorOrientation) {
+            90 -> Pair(normY, 1.0f - normX)
+            270 -> if (isFront) Pair(1.0f - normY, 1.0f - normX) else Pair(1.0f - normY, normX)
+            180 -> Pair(1.0f - normX, 1.0f - normY)
+            else -> Pair(normX, normY)
+        }
+
+        val ratio = _zoomRatio.value
+        val cropW = (activeArray.width() / ratio).toInt()
+        val cropH = (activeArray.height() / ratio).toInt()
+        val cropX = (activeArray.width() - cropW) / 2
+        val cropY = (activeArray.height() - cropH) / 2
+
+        val centerX = cropX + (sensorNormX.coerceIn(0f, 1f) * cropW).toInt()
+        val centerY = cropY + (sensorNormY.coerceIn(0f, 1f) * cropH).toInt()
+        val halfSize = (cropW * 0.08f).toInt().coerceAtLeast(60)
+
+        val meteringRect = Rect(
+            (centerX - halfSize).coerceIn(activeArray.left, activeArray.right),
+            (centerY - halfSize).coerceIn(activeArray.top, activeArray.bottom),
+            (centerX + halfSize).coerceIn(activeArray.left, activeArray.right),
+            (centerY + halfSize).coerceIn(activeArray.top, activeArray.bottom)
+        )
+        val metering = android.hardware.camera2.params.MeteringRectangle(
+            meteringRect,
+            android.hardware.camera2.params.MeteringRectangle.METERING_WEIGHT_MAX
+        )
+        activeAfMeteringRect = metering
+
+        try {
+            // Cancel any in-flight trigger
+            builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
+            builder.set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_CANCEL)
+            session.capture(builder.build(), null, backgroundHandler)
+
+            // Trigger AF and AE precapture metering
+            builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+            builder.set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(metering))
+            builder.set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(metering))
+            builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START)
+            builder.set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START)
+            session.capture(builder.build(), null, backgroundHandler)
+
+            // Restore idle trigger for the continuous repeating preview stream
+            builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE)
+            builder.set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_IDLE)
+            session.setRepeatingRequest(builder.build(), object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureCompleted(
+                    session: CameraCaptureSession,
+                    request: CaptureRequest,
+                    result: TotalCaptureResult
+                ) {
+                    lastCaptureResult = result
+                }
+            }, backgroundHandler)
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to trigger tap-to-focus", e)
+        }
+    }
+
+    fun resetToContinuousAf() {
+        _activeFocusPoint.value = null
+        activeAfMeteringRect = null
+        _isManualFocus.value = false
+        applyPreviewSettings()
     }
 
     @SuppressLint("MissingPermission")
@@ -243,24 +365,11 @@ class CameraSessionController(
                         try {
                             previewRequestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                                 previewSurface?.let { addTarget(it) }
+                                set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
                                 set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
                                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
                             }
-                            applyFlashAndZoom()
-
-                            session.setRepeatingRequest(
-                                previewRequestBuilder!!.build(),
-                                object : CameraCaptureSession.CaptureCallback() {
-                                    override fun onCaptureCompleted(
-                                        session: CameraCaptureSession,
-                                        request: CaptureRequest,
-                                        result: TotalCaptureResult
-                                    ) {
-                                        lastCaptureResult = result
-                                    }
-                                },
-                                backgroundHandler
-                            )
+                            applyPreviewSettings()
                         } catch (e: Exception) {
                             Log.e(tag, "Failed to start preview repeating request", e)
                         }
@@ -277,10 +386,11 @@ class CameraSessionController(
         }
     }
 
-    private fun applyFlashAndZoom() {
+    private fun applyPreviewSettings() {
         val builder = previewRequestBuilder ?: return
         val session = captureSession ?: return
         val chars = currentCharacteristics ?: return
+        val camera = _currentCamera.value
 
         // Flash control
         when (_flashMode.value) {
@@ -302,6 +412,30 @@ class CameraSessionController(
             }
         }
 
+        // Exposure compensation (EV tuning)
+        if (camera != null && camera.supportsExposureCompensation) {
+            val range = camera.aeCompensationRange
+            val step = camera.aeCompensationStep
+            val ev = _exposureCompensation.value
+            val index = Math.round(ev / step).coerceIn(range.lower, range.upper)
+            builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, index)
+        }
+
+        // Focus mode: Manual vs Auto
+        if (_isManualFocus.value) {
+            builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+            builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, _manualFocusDistance.value)
+        } else {
+            val tapRegion = activeAfMeteringRect
+            if (tapRegion != null) {
+                builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+                builder.set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(tapRegion))
+                builder.set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(tapRegion))
+            } else {
+                builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            }
+        }
+
         // Digital Zoom / Crop region
         val activeArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
         if (activeArray != null) {
@@ -314,9 +448,40 @@ class CameraSessionController(
             builder.set(CaptureRequest.SCALER_CROP_REGION, cropRegion)
         }
 
+        // Preview stream latency & frame rate optimization (Lag-free preview)
+        builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+        builder.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_FAST)
+        builder.set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_FAST)
+        builder.set(CaptureRequest.HOT_PIXEL_MODE, CaptureRequest.HOT_PIXEL_MODE_FAST)
+
+        // Best 30/60 fps range to eliminate preview lag and stutter
+        val fpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+        val bestFpsRange = fpsRanges?.firstOrNull { it.lower >= 30 && it.upper >= 30 }
+            ?: fpsRanges?.firstOrNull { it.upper >= 30 }
+            ?: fpsRanges?.firstOrNull()
+        if (bestFpsRange != null) {
+            builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, bestFpsRange)
+        }
+
         try {
-            session.setRepeatingRequest(builder.build(), null, backgroundHandler)
+            session.setRepeatingRequest(
+                builder.build(),
+                object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureCompleted(
+                        session: CameraCaptureSession,
+                        request: CaptureRequest,
+                        result: TotalCaptureResult
+                    ) {
+                        lastCaptureResult = result
+                    }
+                },
+                backgroundHandler
+            )
         } catch (_: Exception) {}
+    }
+
+    fun applyFlashAndZoom() {
+        applyPreviewSettings()
     }
 
     fun onPreviewSurfaceAvailable(surface: Surface) {
@@ -327,6 +492,8 @@ class CameraSessionController(
                 attachPreviewSurfaceDuringRecording(surface)
             } else if (cameraDevice != null) {
                 createPreviewSession()
+            } else {
+                openCamera(camera, surface)
             }
         }
     }

@@ -57,12 +57,19 @@ fun CameraScreen(
             .fillMaxSize()
             .background(DeepObsidian)
     ) {
-        // 1. Camera Preview Surface
+        // 1. Camera Preview Surface (Aspect ratio preserved, hardware accelerated, zero stretching)
         if (uiState.isCameraPermissionGranted) {
             CameraPreviewView(
                 sessionController = viewModel.sessionController,
+                currentCamera = uiState.selectedCamera,
                 currentZoomRatio = uiState.zoomRatio,
                 onZoomChanged = { zoom -> viewModel.setZoom(zoom) },
+                onTapToFocus = { normX, normY, w, h ->
+                    viewModel.triggerTapToFocus(normX, normY, w, h)
+                },
+                activeFocusPoint = uiState.activeFocusPoint,
+                exposureCompensation = uiState.exposureCompensation,
+                onExposureChanged = { ev -> viewModel.setExposureCompensation(ev) },
                 modifier = Modifier.fillMaxSize()
             )
         } else {
@@ -128,7 +135,7 @@ fun CameraScreen(
             }
         }
 
-        // 5. Bottom Controls Bar (Lens selector, Mode switcher, Shutter button, Gallery button)
+        // 5. Bottom Controls Bar (Pro EV/MF tuning, Lens selector, Mode switcher, Shutter button, Gallery button)
         CameraBottomControls(
             uiState = uiState,
             onModeSelect = { mode -> viewModel.setMode(mode) },
@@ -149,6 +156,15 @@ fun CameraScreen(
                 viewModel.openCameraSelectionSheet()
             },
             onGalleryClick = onNavigateToGallery,
+            onToggleEv = { viewModel.toggleEvSlider() },
+            onToggleFocus = { viewModel.toggleFocusSlider() },
+            onEvChange = { ev -> viewModel.setExposureCompensation(ev) },
+            onFocusDistanceChange = { dist ->
+                viewModel.setFocusMode(isManual = true, distance = dist)
+            },
+            onResetEv = { viewModel.setExposureCompensation(0.0f) },
+            onResetAf = { viewModel.resetToContinuousAf() },
+            onCloseTuning = { viewModel.closeTuningSliders() },
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
